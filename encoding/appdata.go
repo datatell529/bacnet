@@ -67,9 +67,17 @@ func (d *Decoder) double(x *float64) {
 }
 
 func (e *Encoder) AppData(i interface{}, typeBVBO bool) error {
-	// Empty BACnet LIST / optional absent value: encode no application data
-	// (opening/closing tags around the property value stay intact).
+	// N-98: an absent/uninitialized value must still be encoded as a legal
+	// application value. Writing nothing produced an empty opening/closing tag
+	// pair (e.g. presentValue `3E 3F`), which standard clients reject with
+	// InvalidTag ("unexpected opening/closing tag"). BACnet NULL
+	// (application tag 0, a single `00` octet) is the protocol's "no value"
+	// primitive and is what bacpypes3 expects for a missing atomic value.
+	// 中文说明：空值/未初始化值必须以**合法**应用数据编码。此前直接不写字节，
+	// 产出空的 opening/closing 标记对（presentValue 形如 `3E 3F`），
+	// 标准客户端（bacpypes3）解析报 InvalidTag。改用 BACnet NULL。
 	if i == nil {
+		e.tag(tagInfo{ID: tagNull, Context: appLayerContext})
 		return nil
 	}
 	//if null used for sending null on point write to prop 87

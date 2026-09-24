@@ -260,12 +260,17 @@ func TestObjectList_ReadPropertyAck_RoundTrip(t *testing.T) {
 	})
 }
 
-func TestAppData_NilEncodesNothing(t *testing.T) {
+// N-98: a nil/absent value must encode as a legal application value — BACnet
+// NULL (tag 0, one `00` octet) — not as nothing. Encoding nothing produced an
+// empty opening/closing tag pair (`3E 3F`) that standard clients reject with
+// InvalidTag. 既有断言改写（旧→新）：旧断言 `nil should encode empty`（期望 0 字节）
+// 编码的正是本批要修的缺陷；新断言期望单个 NULL 应用标记。
+func TestAppData_NilEncodesNull(t *testing.T) {
 	enc := NewEncoder()
 	if err := enc.AppData(nil, false); err != nil {
 		t.Fatal(err)
 	}
-	if len(enc.Bytes()) != 0 {
-		t.Fatalf("nil should encode empty, got %x", enc.Bytes())
+	if got := enc.Bytes(); len(got) != 1 || got[0] != 0x00 {
+		t.Fatalf("nil should encode as BACnet NULL (00), got %x", got)
 	}
 }

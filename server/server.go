@@ -7,6 +7,8 @@ package server
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/anviod/bacnet/btypes"
 	"github.com/anviod/bacnet/btypes/bacerr"
@@ -19,6 +21,62 @@ import (
 
 const mtuHeaderLength = 4
 const forwardHeaderLength = 10
+
+// Request processing limits (D-05). Before these existed, Serve() spawned one
+// goroutine per received datagram with no ceiling: a high-rate stream of
+// requests could create an unbounded number of goroutines and take the whole
+// process down. Concurrency is now bounded by maxConcurrentRequests workers,
+// with a bounded queue in front of them (requestQueueSize); anything beyond
+// that is dropped and counted instead of growing without limit.
+//
+// 中文说明：请求处理上限（D-05）。此前 Serve() 为每个报文无上限地起 goroutine，
+// 高密度请求可把进程打死。现改为固定 maxConcurrentRequests 个工作协程 +
+// 有界队列 requestQueueSize，超出即丢弃并计数，不再无界增长。
+const (
+	maxConcurrentRequests = 32
+	requestQueueSize      = 128
+)
+
+// Receive-error backoff (D-05): a failing data link must not turn Serve() into
+// a busy loop. The delay grows linearly with the consecutive error count and is
+// capped at recvBackoffMax.
+//
+// 中文说明：接收错误退避（D-05）：连续出错时按错误次数线性退避，上限 500ms，
+// 避免紧循环空转吃满 CPU。
+const (
+	recvBackoffStep = 5 * time.Millisecond
+	recvBackoffMax  = 500 * time.Millisecond
+)
+
+// WritePropertyHandler is an optional hook invoked for confirmed WriteProperty
+// requests that target PROP_PRESENT_VALUE. Applications use it to push the new
+// value to the real device / downstream system before the server acknowledges.
+//
+// Returning an error makes the server answer with a BACnet Error
+// (propertyError / writeAccessDenied) instead of a SimpleAck, so a read-only or
+// rejected point is never silently "acknowledged". When no handler is set
+// (the default) the historical behaviour — write the local object store only —
+// is preserved.
+//
+// 中文说明：WritePropertyHandler 是 WriteProperty(Present_Value) 的可选回调，
+// 供应用把新值下发到真实设备/下游系统。返回错误 ⇒ 服务端回 BACnet Error
+// （propertyError/writeAccessDenied），不再假 SimpleAck。未设置（默认）时
+// 保持既有行为：只写本地对象存储。
+type WritePropertyHandler interface {
+	WriteProperty(objType btypes.ObjectType, instance btypes.ObjectInstance, propertyType btypes.PropertyType, value interface{}) error
+}
+
+// serveRequest is one received datagram handed to a worker goroutine.
+// buf is the whole pooled receive buffer and is returned to readBufPool once
+// the request has been handled.
+//
+// 中文说明：serveRequest 是交给工作协程的待处理报文；buf 是整块池化接收缓冲，
+// 处理完归还 readBufPool。
+type serveRequest struct {
+	addr *btypes.Address
+	data []byte
+	buf  []byte
+}
 
 // Server defines the interface for a BACnet server device.
 // A BACnet server responds to WhoIs requests with IAm, and handles
@@ -110,6 +168,14 @@ type DeviceConfig struct {
 	MaxPDU       uint16                     // Maximum PDU size (default: 1476)
 	MaxSegments  uint                       // Maximum segments accepted (default: 0 = no segmentation)
 	Segmentation segmentation.SegmentedType // Segmentation support (default: noSegmentation)
+
+	// WriteHandler is optional (default nil). When set, confirmed
+	// WriteProperty requests for PROP_PRESENT_VALUE are routed through it
+	// before the server acknowledges; a returned error is answered as a BACnet
+	// Error instead of a SimpleAck. See WritePropertyHandler.
+	// WriteHandler 可选（默认 nil）。设置后，WriteProperty(Present_Value) 先经其
+	// 下发；返回错误则回 BACnet Error 而非 SimpleAck。见 WritePropertyHandler。
+	WriteHandler WritePropertyHandler
 }
 
 // DefaultDeviceConfig returns a DeviceConfig with sensible defaults.
@@ -137,6 +203,12 @@ type server struct {
 	readBufPool sync.Pool
 	running     bool
 	stopCh      chan struct{}
+
+	// recvErrs counts consecutive receive errors (used for the bounded
+	// backoff) and dropped counts datagrams discarded because the request
+	// queue was full. Both are only diagnostics.
+	recvErrs int32
+	dropped  uint64
 }
 
 // NewServer creates a new BACnet server with the given configuration.
@@ -238,11 +310,19 @@ func normalizeDeviceConfig(cfg *DeviceConfig) error {
 	return nil
 }
 
-// Serve starts the server message loop. It continuously receives packets
-// from the data link layer and processes them in separate goroutines.
+// Serve starts the server message loop. It receives packets from the data link
+// layer and hands them to a bounded pool of worker goroutines.
 //
-// 中文说明：Serve 启动服务端消息循环。持续从数据链路层接收数据包
-// 并在独立的 goroutine 中处理。
+// Concurrency is capped at maxConcurrentRequests workers fed by a queue of
+// requestQueueSize (D-05); excess datagrams are dropped and counted rather than
+// spawning unbounded goroutines. Each received buffer is returned to
+// readBufPool once its request has been handled, and receive errors trigger a
+// bounded backoff instead of a busy loop.
+//
+// 中文说明：Serve 启动服务端消息循环，把收到的报文交给**有界**工作协程池
+// （maxConcurrentRequests 个 worker + requestQueueSize 队列；D-05）。超出的报文
+// 丢弃并计数，不再无界起 goroutine。接收缓冲处理完归还 readBufPool；接收错误
+// 走有界退避，不再紧循环空转。
 func (s *server) Serve() error {
 	s.mu.Lock()
 	s.running = true
@@ -252,16 +332,36 @@ func (s *server) Serve() error {
 		zap.Uint32("deviceID", uint32(s.config.DeviceID)),
 		zap.String("deviceName", s.config.DeviceName),
 		zap.Int("port", s.config.Port),
+		zap.Int("maxConcurrentRequests", maxConcurrentRequests),
+		zap.Int("requestQueueSize", requestQueueSize),
 	)
 
-	var err error
+	queue := make(chan *serveRequest, requestQueueSize)
+	var wg sync.WaitGroup
+	for i := 0; i < maxConcurrentRequests; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for req := range queue {
+				s.handleMsg(req.addr, req.data)
+				// 处理完把整块接收缓冲归还池，避免 sync.Pool 只 Get 不 Put。
+				s.readBufPool.Put(req.buf)
+			}
+		}()
+	}
+	defer func() {
+		close(queue)
+		wg.Wait()
+	}()
+
 	for {
 		select {
 		case <-s.stopCh:
 			s.mu.Lock()
 			s.running = false
 			s.mu.Unlock()
-			log.Logger.Info("BACnet server stopped")
+			log.Logger.Info("BACnet server stopped",
+				zap.Uint64("dropped", atomic.LoadUint64(&s.dropped)))
 			return nil
 		default:
 		}
@@ -269,11 +369,52 @@ func (s *server) Serve() error {
 		b := s.readBufPool.Get().([]byte)
 		addr, n, recvErr := s.dataLink.Receive(b)
 		if recvErr != nil {
+			s.readBufPool.Put(b)
+			s.recvBackoff(recvErr)
 			continue
 		}
-		go s.handleMsg(addr, b[:n])
-		// Return the buffer to the pool after handling
-		_ = err
+		atomic.StoreInt32(&s.recvErrs, 0)
+		if n <= 0 {
+			// 空报文（例如数据链路已关闭）同样归还缓冲，不进入处理队列。
+			s.readBufPool.Put(b)
+			continue
+		}
+
+		req := &serveRequest{addr: addr, data: b[:n], buf: b}
+		select {
+		case queue <- req:
+		default:
+			// 队列已满：有界背压 —— 丢弃并计数，不无界堆积。
+			s.readBufPool.Put(b)
+			dropped := atomic.AddUint64(&s.dropped, 1)
+			if dropped == 1 || dropped%1000 == 0 {
+				log.Logger.Warn("request queue full, datagram dropped",
+					zap.Uint64("dropped", dropped),
+					zap.Int("queueSize", requestQueueSize))
+			}
+		}
+	}
+}
+
+// recvBackoff sleeps for a bounded, linearly growing delay after a receive
+// error so a persistently failing data link cannot spin the receive loop.
+//
+// 中文说明：接收出错后有界线性退避，避免数据链路持续故障时紧循环空转。
+func (s *server) recvBackoff(err error) {
+	n := atomic.AddInt32(&s.recvErrs, 1)
+	d := time.Duration(n) * recvBackoffStep
+	if d > recvBackoffMax {
+		d = recvBackoffMax
+	}
+	if n == 1 || n%100 == 0 {
+		log.Logger.Warn("data link receive error, backing off",
+			zap.Int32("consecutive", n),
+			zap.Duration("backoff", d),
+			zap.Error(err))
+	}
+	select {
+	case <-s.stopCh:
+	case <-time.After(d):
 	}
 }
 
@@ -695,6 +836,23 @@ func (s *server) handleWriteProperty(src *btypes.Address, npdu *btypes.NPDU, apd
 	if !found {
 		s.sendError(src, npdu, apdu.InvokeId, apdu.Service, bacerr.ObjectError, bacerr.UnknownObject)
 		return
+	}
+
+	// Route Present_Value writes through the optional handler FIRST, so the
+	// value actually reaches the real device/downstream system. A rejection
+	// (read-only point, southbound failure, ...) is reported as a BACnet Error
+	// instead of a SimpleAck — no more "acknowledged but nothing happened".
+	// 中文说明：Present_Value 先经可选回调下发到真实设备/下游；被拒（只读点、
+	// 南向失败等）⇒ 回 BACnet Error，不再假 SimpleAck。
+	if propType == btypes.PROP_PRESENT_VALUE && s.config.WriteHandler != nil {
+		if hErr := s.config.WriteHandler.WriteProperty(objType, objInstance, propType, propValue); hErr != nil {
+			log.Logger.Warn("WriteProperty rejected by handler",
+				zap.Uint32("objectType", uint32(objType)),
+				zap.Uint32("instance", uint32(objInstance)),
+				zap.Error(hErr))
+			s.sendError(src, npdu, apdu.InvokeId, apdu.Service, bacerr.PropertyError, bacerr.WriteAccessDenied)
+			return
+		}
 	}
 
 	// Write the property value
