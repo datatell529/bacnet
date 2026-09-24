@@ -24,9 +24,21 @@ func (e *Encoder) NPDU(n *btypes.NPDU) {
 		}
 	}
 
-	// Always encode source address when present, so that devices
-	// using ephemeral ports (Net==0) can still receive routed responses.
-	if n.Source != nil {
+	// A source specifier (SNET/SADR) is only required when the message is
+	// routed, i.e. when the source lives on a non-zero BACnet network.
+	// For direct BACnet/IP (ASHRAE 135 Annex J) unicast the source is already
+	// carried by the BVLC header, and emitting SNET=0/SADR for a local station
+	// makes standard clients (e.g. bacpypes3) classify the reply as coming from
+	// a *remote* station on network 0 (addrType=4) instead of the IPv4 peer they
+	// sent to (addrType=2). The resulting transaction-key mismatch makes them
+	// silently discard every confirmed ACK ⇒ all reads/writes time out while
+	// unconfirmed services (I-Am) keep working.
+	// 源地址说明符（SNET/SADR）仅在报文被路由（源位于非 0 号 BACnet 网络）时才需要。
+	// BACnet/IP（ASHRAE 135 Annex J）直接单播的源已由 BVLC 头携带；若对本地站点写出
+	// SNET=0/SADR，标准客户端（如 bacpypes3）会把应答解析成"0 号网络上的远程站"
+	// （addrType=4），与事务 key 所用的 IPv4 对端（addrType=2）不符 ⇒ 确认类 ACK 被
+	// 静默丢弃、读写全超时；非确认服务（I-Am）则不受影响。
+	if n.Source != nil && n.Source.Net != 0 {
 		meta.SetSource(true)
 	}
 	e.write(meta)
