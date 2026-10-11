@@ -138,12 +138,32 @@ func (d *Decoder) ReadProperty(data *btypes.PropertyData) error {
 		}
 
 		if openTag == 3 {
-			// We subtract one to ignore the closing tag.
+			// The property value is a list of application values terminated by the
+			// layer-3 closing tag. Peek one byte at a time (same paradigm as
+			// COVNotification) so the closing tag — not the remaining byte count —
+			// is the single end condition; otherwise the closing tag and an
+			// optional priority tag were parsed as application data, turning the
+			// value into a polluted array.
+			// 中文说明：以本层（tag 3）闭合标签为唯一结束条件，避免把闭合标签/
+			// 可选 priority 标签当应用数据继续解析。
 			datalist := make([]interface{}, 0)
+			for d.buff.Len() > 0 {
+				peek, err := d.buff.ReadByte()
+				if err != nil {
+					break
+				}
+				_ = d.buff.UnreadByte()
+				// A closing tag is context-specific with the low three bits set.
+				// Application values never set the class bit, so this cannot
+				// false-positive on a value whose low bits happen to be 111.
+				if isClosingTag(peek) && (peek&contextSpecificBit) != 0 {
+					closeTag, closeMeta := d.tagNumber()
+					if closeTag != 3 || !closeMeta.isClosing() {
+						return fmt.Errorf("Expected closing tag 3, got tag %d", closeTag)
+					}
+					break
+				}
 
-			// There is a closing tag of size 1 byte that we ignore which is why we are
-			// looping until the length is greater than 1
-			for i := 0; d.buff.Len() > 1; i++ {
 				data, err := d.AppData()
 				if err != nil {
 					d.err = err
@@ -156,6 +176,26 @@ func (d *Decoder) ReadProperty(data *btypes.PropertyData) error {
 			// If we only have one value in the list, lets just return that value
 			if len(datalist) == 1 {
 				prop.Data = datalist[0]
+			}
+
+			// Optional priority tag (context tag 4) may follow the value list. Read
+			// it only when it is actually present and never fold it into prop.Data;
+			// when absent, not a single extra byte is consumed so existing payloads
+			// decode exactly as before.
+			// 中文说明：仅在可选 priority 标签确实存在时读取，写入 prop.Priority，
+			// 绝不并入 prop.Data；无该标签时不多读一个字节。
+			if d.buff.Len() > 0 {
+				peek, err := d.buff.ReadByte()
+				if err != nil {
+					return err
+				}
+				_ = d.buff.UnreadByte()
+				if !isClosingTag(peek) && !isOpeningTag(peek) &&
+					(peek&contextSpecificBit) != 0 && (peek>>4) == 4 {
+					_, meta = d.tagNumber()
+					lenValue := d.value(meta)
+					prop.Priority = btypes.NPDUPriority(d.unsigned(int(lenValue)))
+				}
 			}
 		}
 	} else {
