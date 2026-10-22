@@ -39,12 +39,11 @@ const (
 	//
 	// RPM pseudo-properties: ALL / REQUIRED / OPTIONAL are not real object
 	// properties. They are the special markers a ReadPropertyMultiple client
-	// (e.g. YABE) uses to request a whole property set; their wire values are
-	// 0xFF / 0xFE / 0xFD respectively. Numerically they overlap
-	// PROP_ACTIVE_AUTHENTICATION_POLICY (255), PROP_ACTIVATION_TIME (254) and
-	// PROP_ACCOMPANIMENT_TIME (253); RPM expansion gives the pseudo-property
-	// meaning priority.
-	// PROP_OBJECT_LIST stays at 76 (ASHRAE 135 object-list); 72 is notify-type.
+	// (e.g. YABE) uses to request a whole property set. To stay consistent with
+	// the fork's upstream source (b809a2e4), this repo keeps ALL=8, OPTIONAL=80
+	// and REQUIRED=105. These are internal marker values chosen by that source
+	// and must not be treated as wire-standard pseudo-property codes.
+	// PROP_OBJECT_LIST is 76 (ASHRAE 135 object-list); 72 is notify-type.
 	PROP_ACKED_TRANSITIONS                  PropertyType = 0
 	PROP_ACK_REQUIRED                       PropertyType = 1
 	PROP_ACTION                             PropertyType = 2
@@ -53,7 +52,7 @@ const (
 	PROP_ACTIVE_VT_SESSIONS                 PropertyType = 5
 	PROP_ALARM_VALUE                        PropertyType = 6
 	PROP_ALARM_VALUES                       PropertyType = 7
-	PROP_ALL                                PropertyType = 0xFF
+	PROP_ALL                                PropertyType = 8
 	PROP_ALL_WRITES_SUCCESSFUL              PropertyType = 9
 	PROP_APDU_SEGMENT_TIMEOUT               PropertyType = 10
 	PROP_APDU_TIMEOUT                       PropertyType = 11
@@ -125,7 +124,7 @@ const (
 	PROP_OBJECT_NAME                          PropertyType = 77
 	PROP_OBJECT_PROPERTY_REFERENCE            PropertyType = 78
 	PROP_OBJECT_TYPE                          PropertyType = 79
-	PROP_OPTIONAL                             PropertyType = 0xFD
+	PROP_OPTIONAL                             PropertyType = 80
 	PROP_OUT_OF_SERVICE                       PropertyType = 81
 	PROP_OUTPUT_Propertybtypes                PropertyType = 82
 	PROP_EVENT_PARAMETERS                     PropertyType = 83
@@ -149,7 +148,7 @@ const (
 	PROP_RECIPIENT_LIST     PropertyType = 102
 	PROP_RELIABILITY        PropertyType = 103
 	PROP_RELINQUISH_DEFAULT PropertyType = 104
-	PROP_REQUIRED           PropertyType = 0xFE
+	PROP_REQUIRED           PropertyType = 105
 	PROP_RESOLUTION         PropertyType = 106
 
 	PROP_SETPOINT                        PropertyType = 108

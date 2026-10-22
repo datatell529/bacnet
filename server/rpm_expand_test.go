@@ -214,22 +214,56 @@ func TestExpandObjectProps(t *testing.T) {
 	}
 }
 
-// RPM 伪属性常量必须使用标准线上值；PROP_OBJECT_LIST 必须是 76（object-list），
-// 72 是 notify-type。
+// RPM 伪属性常量必须与上游 b809a2e4 逐字一致：ALL=8、OPTIONAL=80、REQUIRED=105；
+// PROP_OBJECT_LIST 必须是 76（object-list），72 是 notify-type。
 func TestRPMPseudoPropertyConstants(t *testing.T) {
-	if btypes.PROP_ALL != btypes.PropertyType(0xff) {
-		t.Fatalf("PROP_ALL = 0x%X，期望 0xff", uint32(btypes.PROP_ALL))
+	if btypes.PROP_ALL != btypes.PropertyType(8) {
+		t.Fatalf("PROP_ALL = %d，期望 8", uint32(btypes.PROP_ALL))
 	}
-	if btypes.PROP_OPTIONAL != btypes.PropertyType(0xfd) {
-		t.Fatalf("PROP_OPTIONAL = 0x%X，期望 0xfd", uint32(btypes.PROP_OPTIONAL))
+	if btypes.PROP_OPTIONAL != btypes.PropertyType(80) {
+		t.Fatalf("PROP_OPTIONAL = %d，期望 80", uint32(btypes.PROP_OPTIONAL))
 	}
-	if btypes.PROP_REQUIRED != btypes.PropertyType(0xfe) {
-		t.Fatalf("PROP_REQUIRED = 0x%X，期望 0xfe", uint32(btypes.PROP_REQUIRED))
+	if btypes.PROP_REQUIRED != btypes.PropertyType(105) {
+		t.Fatalf("PROP_REQUIRED = %d，期望 105", uint32(btypes.PROP_REQUIRED))
 	}
 	if btypes.PROP_OBJECT_LIST != btypes.PropertyType(76) {
 		t.Fatalf("PROP_OBJECT_LIST = %d，期望 76", uint32(btypes.PROP_OBJECT_LIST))
 	}
 	if btypes.PROP_NOTIFY_TYPE != btypes.PropertyType(72) {
 		t.Fatalf("PROP_NOTIFY_TYPE = %d，期望 72", uint32(btypes.PROP_NOTIFY_TYPE))
+	}
+}
+
+// 一致性断言：RPM 伪属性标记与同语义的属性别名/相邻真实属性不冲突，
+// 避免后续维护时把 ALL/OPTIONAL/REQUIRED 重新指向相互重叠的数值。
+func TestRPMPseudoPropertyConstantsConsistency(t *testing.T) {
+	// PROP_ALL 与可选属性名 AllProperties 指向同一语义（both = 8）。
+	if btypes.PROP_ALL != btypes.PropAllProperties {
+		t.Fatalf("PROP_ALL = %d，与 PropAllProperties = %d 不一致",
+			uint32(btypes.PROP_ALL), uint32(btypes.PropAllProperties))
+	}
+	// PROP_OBJECT_LIST 与可选属性名 ObjectList 指向同一语义（both = 76）。
+	if btypes.PROP_OBJECT_LIST != btypes.PropObjectList {
+		t.Fatalf("PROP_OBJECT_LIST = %d，与 PropObjectList = %d 不一致",
+			uint32(btypes.PROP_OBJECT_LIST), uint32(btypes.PropObjectList))
+	}
+	// 三个伪属性必须互不相等，且不得与 Object_List / Notify_Type 撞值。
+	pseudo := map[string]btypes.PropertyType{
+		"ALL":      btypes.PROP_ALL,
+		"OPTIONAL": btypes.PROP_OPTIONAL,
+		"REQUIRED": btypes.PROP_REQUIRED,
+	}
+	seen := make(map[btypes.PropertyType]string, len(pseudo))
+	for name, val := range pseudo {
+		if other, ok := seen[val]; ok {
+			t.Fatalf("%s 与 %s 取值冲突（%d）", name, other, uint32(val))
+		}
+		seen[val] = name
+	}
+	for name, val := range pseudo {
+		if val == btypes.PROP_OBJECT_LIST || val == btypes.PROP_NOTIFY_TYPE {
+			t.Fatalf("%s（%d）与真实属性 Object_List(76)/Notify_Type(72) 撞值",
+				name, uint32(val))
+		}
 	}
 }
