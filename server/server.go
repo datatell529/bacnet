@@ -900,13 +900,11 @@ func (s *server) handleReadMultiProperty(src *btypes.Address, npdu *btypes.NPDU,
 		}
 
 		for _, reqProp := range reqObj.Properties {
-			// Expand ALL/REQUIRED/OPTIONAL on Device into concrete properties.
-			if objType == btypes.DeviceType &&
-				(reqProp.Type == btypes.PROP_ALL || reqProp.Type == btypes.PROP_REQUIRED || reqProp.Type == btypes.PROP_OPTIONAL) {
-				if !s.store.DevicePropertyExists(objInstance) {
-					continue
-				}
-				respObj.Properties = append(respObj.Properties, s.store.ListDeviceProperties()...)
+			// Expand ALL/REQUIRED/OPTIONAL pseudo-properties into concrete ones
+			// for every object type (YABE and other browsers rely on this).
+			// 中文说明：对任意对象类型展开 ALL/REQUIRED/OPTIONAL，而非仅 Device。
+			if reqProp.Type == btypes.PROP_ALL || reqProp.Type == btypes.PROP_REQUIRED || reqProp.Type == btypes.PROP_OPTIONAL {
+				respObj.Properties = append(respObj.Properties, s.expandObjectProps(objType, objInstance)...)
 				continue
 			}
 
@@ -975,6 +973,24 @@ func (s *server) handleWriteMultiProperty(src *btypes.Address, npdu *btypes.NPDU
 
 		changedPV := false
 		for _, prop := range obj.Properties {
+			// Route Present_Value writes through the optional handler FIRST, just
+			// like the single-property path, so WPM writes actually reach the real
+			// device/downstream system. A rejection (read-only point, southbound
+			// failure, ...) is reported as a BACnet Error instead of a SimpleAck —
+			// never acknowledge a write that the handler refused.
+			// 中文说明：WPM 的 Present_Value 先经可选回调下发到真实设备/下游；被拒
+			// （只读点、南向失败等）⇒ 回 BACnet Error，不得假 SimpleAck。
+			if prop.Type == btypes.PROP_PRESENT_VALUE && s.config.WriteHandler != nil {
+				if hErr := s.config.WriteHandler.WriteProperty(objType, objInstance, prop.Type, prop.Data); hErr != nil {
+					log.Logger.Warn("WritePropertyMultiple rejected by handler",
+						zap.Uint32("objectType", uint32(objType)),
+						zap.Uint32("instance", uint32(objInstance)),
+						zap.Error(hErr))
+					s.sendError(src, npdu, apdu.InvokeId, apdu.Service, bacerr.PropertyError, bacerr.WriteAccessDenied)
+					return
+				}
+			}
+
 			err = s.store.SetProperty(objType, objInstance, prop.Type, prop.Data)
 			if err != nil {
 				s.sendError(src, npdu, apdu.InvokeId, apdu.Service, bacerr.PropertyError, bacerr.WriteAccessDenied)
