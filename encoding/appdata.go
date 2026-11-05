@@ -142,6 +142,49 @@ func (e *Encoder) AppData(i interface{}, typeBVBO bool) error {
 		length := valueLength(val)
 		e.tag(tagInfo{ID: tagUint, Context: appLayerContext, Value: uint32(length)})
 		e.unsigned(val)
+	case uint8:
+		length := valueLength(uint32(val))
+		e.tag(tagInfo{ID: tagUint, Context: appLayerContext, Value: uint32(length)})
+		e.unsigned(uint32(val))
+	case uint16:
+		length := valueLength(uint32(val))
+		e.tag(tagInfo{ID: tagUint, Context: appLayerContext, Value: uint32(length)})
+		e.unsigned(uint32(val))
+	case int8:
+		// 1 字节二进制补码
+		e.tag(tagInfo{ID: tagInt, Context: appLayerContext, Value: size8})
+		e.unsigned(uint32(uint8(val)))
+	case int16:
+		// SIGNED 最短长度：[-128,127] ⇒ 1 字节，否则 2 字节
+		v := int64(val)
+		length, mask := size8, uint32(0xFF)
+		if v < -128 || v > 127 {
+			length, mask = size16, 0xFFFF
+		}
+		e.tag(tagInfo{ID: tagInt, Context: appLayerContext, Value: uint32(length)})
+		e.unsigned(uint32(v) & mask)
+	case int:
+		// int 先按 int64 取值域；超出 BACnet SIGNED 32 位直接报错，不静默截断。
+		v := int64(val)
+		if v < -(1<<31) || v > (1<<31)-1 {
+			err := fmt.Errorf("int value %d out of BACnet SIGNED 32-bit range", v)
+			e.err = err
+			return err
+		}
+		var length int
+		var mask uint32
+		switch {
+		case v >= -128 && v <= 127:
+			length, mask = size8, 0xFF
+		case v >= -32768 && v <= 32767:
+			length, mask = size16, 0xFFFF
+		case v >= -8388608 && v <= 8388607:
+			length, mask = size24, 0xFFFFFF
+		default:
+			length, mask = size32, 0xFFFFFFFF
+		}
+		e.tag(tagInfo{ID: tagInt, Context: appLayerContext, Value: uint32(length)})
+		e.unsigned(uint32(v) & mask)
 	case int32:
 		v := uint32(val)
 		length := valueLength(v)
