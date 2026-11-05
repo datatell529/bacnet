@@ -632,8 +632,23 @@ func (s *server) handleConfirmed(src *btypes.Address, npdu *btypes.NPDU, apdu *b
 // BACnet port (47808). This allows other BACnet devices (like YABE) to
 // discover this server even when they're using a different port.
 func (s *server) SendIAm() error {
-	broadcastAddr := s.dataLink.GetBroadcastAddress()
+	return s.SendIAmTo(s.dataLink.GetBroadcastAddress())
+}
 
+// SendIAmTo sends an I-Am message to dest using exactly the same encoding
+// path as SendIAm; only the destination differs. It lets a server that
+// listens on a non-standard port additionally announce itself on another
+// address (for example the standard BACnet port 47808).
+//
+// This method is intentionally not part of the Server interface: callers
+// that need it use an optional interface assertion, so existing downstream
+// Server implementations are not broken.
+//
+// 中文说明：SendIAmTo 用与 SendIAm 完全相同的编码路径构造 I-Am 报文，只把目的
+// 地址换成 dest。监听非标准端口的服务端可借此额外向其它地址（如标准端口
+// 47808）通告自己。本方法有意不加入 Server 接口，调用方通过可选接口断言使用，
+// 以免破坏下游既有的 Server 实现。
+func (s *server) SendIAmTo(dest *btypes.Address) error {
 	iam := btypes.IAm{
 		ID: btypes.ObjectID{
 			Type:     btypes.DeviceType,
@@ -651,13 +666,13 @@ func (s *server) SendIAm() error {
 		return err
 	}
 
-	_, err = s.sendPacket(broadcastAddr, nil, enc.Bytes(), true)
+	_, err = s.sendPacket(dest, nil, enc.Bytes(), true)
 	if err != nil {
 		log.Logger.Error("failed to send IAm", zap.Error(err))
 		return err
 	}
 
-	if udpAddr, err := broadcastAddr.UDPAddr(); err == nil {
+	if udpAddr, err := dest.UDPAddr(); err == nil {
 		log.Logger.Info("sent IAm broadcast",
 			zap.Uint32("deviceID", uint32(s.store.GetDeviceID())),
 			zap.String("broadcastAddr", udpAddr.String()),
