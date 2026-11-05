@@ -237,11 +237,15 @@ func NewServer(cfg *DeviceConfig) (Server, error) {
 	var err error
 
 	if cfg.Interface != "" {
+		// Interface path is intentionally unchanged (no narrowing, broadcast
+		// port stays 0xBAC0); tracked as a separate TODO.
 		dataLink, err = datalink.NewUDPDataLink(cfg.Interface, cfg.Port)
 	} else if cfg.Ip != "" {
-		dataLink, err = datalink.NewUDPDataLinkFromIP(cfg.Ip, cfg.SubnetCIDR, cfg.Port)
+		// Server-side bound constructor: bind cfg.Ip (falling back to 0.0.0.0
+		// when unspecified) and send I-Am to the listening port.
+		dataLink, err = datalink.NewUDPDataLinkFromIPBound(cfg.Ip, cfg.SubnetCIDR, cfg.Port, cfg.Port)
 	} else {
-		dataLink, err = datalink.NewUDPDataLinkFromIP("0.0.0.0", cfg.SubnetCIDR, cfg.Port)
+		dataLink, err = datalink.NewUDPDataLinkFromIPBound("0.0.0.0", cfg.SubnetCIDR, cfg.Port, cfg.Port)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to create data link: %w", err)

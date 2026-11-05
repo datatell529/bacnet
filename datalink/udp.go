@@ -63,7 +63,10 @@ type udpDataLink struct {
 	// netInterface                *net.Interface
 	myAddress, broadcastAddress *btypes.Address
 	port                        int
-	listener                    *net.UDPConn
+	// bcastPort is the UDP port used for broadcast traffic (Who-Is / I-Am).
+	// Zero or negative falls back to DefaultPort (0xBAC0).
+	bcastPort int
+	listener  *net.UDPConn
 }
 
 /*
@@ -84,7 +87,7 @@ func NewUDPDataLink(inter string, port int) (link DataLink, err error) {
 		}
 		fmt.Printf("find addr: %s -> %s\n", inter, addr)
 	}
-	link, err = dataLink(addr, port)
+	link, err = dataLink(addr, port, "", 0)
 	if err != nil {
 		return nil, err
 	}
@@ -92,7 +95,7 @@ func NewUDPDataLink(inter string, port int) (link DataLink, err error) {
 }
 
 func NewUDPDataLinkFromCIDR(cidr string, port int) (link DataLink, err error) {
-	return dataLink(cidr, port)
+	return dataLink(cidr, port, "", 0)
 }
 
 /*
@@ -103,14 +106,42 @@ NewUDPDataLinkFromIP returns udp listener
 */
 func NewUDPDataLinkFromIP(addr string, subNet, port int) (link DataLink, err error) {
 	addr = fmt.Sprintf("%s/%d", addr, subNet)
-	link, err = dataLink(addr, port)
+	link, err = dataLink(addr, port, "", 0)
 	if err != nil {
 		return nil, err
 	}
 	return link, nil
 }
 
-func dataLink(ipAddr string, port int) (DataLink, error) {
+/*
+NewUDPDataLinkFromIPBound returns a server-side udp listener that binds the
+local socket to bindAddr and advertises broadcast (I-Am / Who-Is) traffic on
+bcastPort.
+
+  - addr: 192.168.15.10 (also the address used to derive the subnet broadcast)
+  - subNet: 24
+  - port: 47808 (listening port)
+  - bcastPort: 47808 (0 or negative falls back to DefaultPort)
+
+A bindAddr that is empty or unspecified (0.0.0.0) keeps the legacy wildcard
+bind. Client-side constructors intentionally do NOT use this path: they must
+keep binding INADDR_ANY to receive broadcast I-Am packets.
+
+NewUDPDataLinkFromIPBound 返回服务端专用的 UDP 监听器：本地 socket 绑定到
+bindAddr，广播（I-Am / Who-Is）使用 bcastPort。bindAddr 为空或 0.0.0.0 时
+保留原有的通配绑定（回落）。客户端构造不使用此路径，必须继续绑定 INADDR_ANY
+以接收广播 I-Am。
+*/
+func NewUDPDataLinkFromIPBound(addr string, subNet, port, bcastPort int) (link DataLink, err error) {
+	cidr := fmt.Sprintf("%s/%d", addr, subNet)
+	link, err = dataLink(cidr, port, addr, bcastPort)
+	if err != nil {
+		return nil, err
+	}
+	return link, nil
+}
+
+func dataLink(ipAddr string, port int, bindAddr string, bcastPort int) (DataLink, error) {
 	if port == 0 {
 		port = DefaultPort
 	}
@@ -125,25 +156,48 @@ func dataLink(ipAddr string, port int) (DataLink, error) {
 		broadcast[i] = ipNet.IP[i] | ^ipNet.Mask[i]
 	}
 
-	// If IP is 0.0.0.0, use a real local IP for the source address
+	// bindIP is the local address the socket binds to. Empty/unspecified keeps
+	// the legacy wildcard bind (INADDR_ANY); only the server-side bound
+	// constructor narrows it to a configured address.
+	// bindIP 为本地绑定地址；空/未指定保持原有通配绑定（INADDR_ANY），
+	// 只有服务端绑定构造才收窄到配置地址。
+	bindIP := net.IPv4(0, 0, 0, 0)
+	if bindAddr != "" {
+		parsed := net.ParseIP(bindAddr)
+		if parsed == nil {
+			return nil, fmt.Errorf("invalid bind address %q", bindAddr)
+		}
+		v4 := parsed.To4()
+		if v4 == nil {
+			return nil, fmt.Errorf("bind address %q is not IPv4", bindAddr)
+		}
+		if !v4.IsUnspecified() {
+			bindIP = v4
+		}
+	}
+
+	// If the endpoint IP is 0.0.0.0, use a real local IP for the source address
 	// This ensures BACnet devices can respond to our NPDU source address
 	actualIP := ip
-	if ip.IsUnspecified() {
+	if !bindIP.IsUnspecified() {
+		actualIP = bindIP
+	} else if ip.IsUnspecified() {
 		actualIP = GetLocalIP()
 		if actualIP.IsUnspecified() {
 			actualIP = ip // fallback to 0.0.0.0 if no local IP found
 		}
 	}
 
-	// Yabe-style: bind to 0.0.0.0 (INADDR_ANY) to receive broadcast IAm responses.
-	// The official Yabe tool binds to INADDR_ANY so it can receive IAm packets
-	// sent to 255.255.255.255 (global broadcast) by some BACnet simulators.
-	// The NPDU source address still uses the actual IP for correct routing.
-	// Yabe 风格：绑定到 0.0.0.0 (INADDR_ANY) 以接收广播 IAm 响应。
+	// Yabe-style: the legacy client path binds to 0.0.0.0 (INADDR_ANY) to
+	// receive broadcast IAm responses. The official Yabe tool binds to
+	// INADDR_ANY so it can receive IAm packets sent to 255.255.255.255 (global
+	// broadcast) by some BACnet simulators. The NPDU source address still uses
+	// the actual IP for correct routing.
+	// Yabe 风格：既有客户端路径绑定到 0.0.0.0 (INADDR_ANY) 以接收广播 IAm 响应。
 	// 官方 Yabe 工具绑定到 INADDR_ANY，以便接收某些 BACnet 模拟器
 	// 发送到 255.255.255.255（全局广播）的 IAm 包。
 	// NPDU 源地址仍使用实际 IP 以保证正确路由。
-	udpAddrStr := fmt.Sprintf("0.0.0.0:%d", port)
+	udpAddrStr := fmt.Sprintf("%s:%d", bindIP.String(), port)
 
 	// Reusable bind: set SO_REUSEADDR so room-simulator can coexist with YABE on
 	// the same Windows host. When bound to INADDR_ANY, broadcast Who-Is messages
@@ -162,11 +216,12 @@ func dataLink(ipAddr string, port int) (DataLink, error) {
 	//log.Printf("[DEBUG] UDP DataLink listening on %s:%d (Broadcast: %s)\n", ipAddr, port, broadcast.String())
 
 	return &udpDataLink{
-		listener:         udpConn,
-		port:             port,
-		myAddress:        IPPortToAddress(actualIP, port),
-		// Broadcast IP is computed from the subnet; port and MacLen are
-		// finalized in GetBroadcastAddress() to use the standard BACnet port.
+		listener:  udpConn,
+		port:      port,
+		bcastPort: bcastPort,
+		myAddress: IPPortToAddress(actualIP, port),
+		// Broadcast IP is computed from the subnet; the port and MacLen are
+		// finalized in GetBroadcastAddress() (DefaultPort when bcastPort <= 0).
 		broadcastAddress: IPPortToAddress(broadcast, port),
 	}, nil
 }
@@ -203,16 +258,22 @@ func (c *udpDataLink) GetMyAddress() *btypes.Address {
 	return c.myAddress
 }
 
-// GetBroadcastAddress returns the subnet broadcast address with the standard
-// BACnet port (47808) and MacLen=0 to mark it as a broadcast address.
+// GetBroadcastAddress returns the subnet broadcast address with the broadcast
+// port and MacLen=0 to mark it as a broadcast address. bcastPort <= 0 keeps the
+// standard BACnet port (47808); the server passes its listening port so I-Am
+// announcements follow the port actually in use.
 // The listening port may differ from the broadcast port to avoid SO_REUSEADDR
 // conflicts when multiple BACnet entities share the same host.
 func (c *udpDataLink) GetBroadcastAddress() *btypes.Address {
 	addr := *c.broadcastAddress
-	// Override port to standard BACnet port for broadcast
+	port := c.bcastPort
+	if port <= 0 {
+		port = DefaultPort
+	}
+	// Override port to the broadcast port
 	if len(addr.Mac) >= 6 {
-		addr.Mac[4] = 0xBA
-		addr.Mac[5] = 0xC0
+		addr.Mac[4] = uint8(port >> 8)
+		addr.Mac[5] = uint8(port & 0xFF)
 	}
 	addr.MacLen = 0 // mark as broadcast address
 	return &addr
