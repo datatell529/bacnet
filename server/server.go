@@ -237,9 +237,9 @@ func NewServer(cfg *DeviceConfig) (Server, error) {
 	var err error
 
 	if cfg.Interface != "" {
-		// Interface path is intentionally unchanged (no narrowing, broadcast
-		// port stays 0xBAC0); tracked as a separate TODO.
-		dataLink, err = datalink.NewUDPDataLink(cfg.Interface, cfg.Port)
+		// Server-side interface path: bind the interface IPv4 and broadcast on
+		// the listening port (same semantics as the cfg.Ip path).
+		dataLink, err = datalink.NewUDPDataLinkFromInterfaceBound(cfg.Interface, cfg.Port)
 	} else if cfg.Ip != "" {
 		// Server-side bound constructor: bind cfg.Ip (falling back to 0.0.0.0
 		// when unspecified) and send I-Am to the listening port.

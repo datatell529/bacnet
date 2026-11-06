@@ -94,6 +94,50 @@ func NewUDPDataLink(inter string, port int) (link DataLink, err error) {
 	return link, nil
 }
 
+/*
+NewUDPDataLinkFromInterfaceBound returns a server-side UDP listener bound to
+the IPv4 address of the named interface and advertises broadcast (I-Am /
+Who-Is) traffic on the interface's subnet-directed broadcast address using the
+listening port.
+
+inter accepts either an interface name ("eth0") or an "ip/prefix" string,
+matching NewUDPDataLink's tolerance. Unlike NewUDPDataLink, failures (unknown
+interface, no IPv4 address, bad CIDR) are returned to the caller: it never
+silently falls back to binding 0.0.0.0.
+
+NewUDPDataLinkFromInterfaceBound 返回服务端专用的 UDP 监听器：收窄绑定到指定
+网卡的 IPv4 地址，广播发往该网卡所在子网的定向广播地址，广播端口 = 监听端口。
+inter 可为网卡名（"eth0"）或 "ip/prefix"。网卡不存在 / 无 IPv4 / CIDR 解析失败
+时返回 error，不静默回落 0.0.0.0。客户端仍须使用 NewUDPDataLink（INADDR_ANY）。
+*/
+func NewUDPDataLinkFromInterfaceBound(inter string, port int) (DataLink, error) {
+	cidr := inter
+	if !strings.ContainsRune(inter, '/') {
+		var err error
+		cidr, err = FindCIDRAddress(inter)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	ip, _, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid interface address %q: %w", inter, err)
+	}
+	bindIP := ip.To4()
+	if bindIP == nil {
+		return nil, fmt.Errorf("interface address %q is not IPv4", cidr)
+	}
+	if bindIP.IsUnspecified() {
+		return nil, fmt.Errorf("interface address %q resolves to unspecified IPv4", cidr)
+	}
+
+	// Reuse the existing bound dataLink path: narrow the bind to the interface
+	// IPv4 and send broadcasts to the subnet-directed address on the listening
+	// port.
+	return dataLink(cidr, port, bindIP.String(), port)
+}
+
 func NewUDPDataLinkFromCIDR(cidr string, port int) (link DataLink, err error) {
 	return dataLink(cidr, port, "", 0)
 }

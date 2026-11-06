@@ -214,16 +214,18 @@ func (d *Decoder) unsigned(length int) uint32 {
 }
 
 func (d *Decoder) signed24() int32 {
-	var a, b, c int8
+	var a, b, c uint8
 	d.decode(&a)
 	d.decode(&b)
 	d.decode(&c)
 
-	var x int32
-	x = int32((int32(a) << 16) & 0x00ff0000)
-	x |= int32((int32(b) << 8) & 0x0000ff00)
-	x |= int32(int32(c) & 0x000000ff)
-	return x
+	// Assemble the 24-bit two's-complement value first, then sign-extend bit23
+	// to bit31. Masking each byte into an int32 beforehand dropped the sign bit
+	// (e.g. -1 decoded as 16777215).
+	// 先拼出 24 位补码值，再把 bit23 符号扩展到 bit31；此前的逐字节掩码
+	// 会吞掉符号位（如 -1 解成 16777215）。
+	x := int32(uint32(a&0xff)<<16 | uint32(b&0xff)<<8 | uint32(c&0xff))
+	return int32(uint32(x)<<8) >> 8
 }
 
 func (d *Decoder) signed(length int) int32 {
