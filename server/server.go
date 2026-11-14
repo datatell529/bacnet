@@ -896,6 +896,19 @@ func (s *server) handleWriteProperty(src *btypes.Address, npdu *btypes.NPDU, apd
 		}
 	}
 
+	// Capture the stored Present_Value BEFORE the write so the COV notification
+	// below is gated on an actual value change, exactly like server.SetProperty.
+	// A missing old value means "first write" and still notifies. This path
+	// writes through s.store directly (it does NOT call s.SetProperty), so this
+	// is the single notification for this write.
+	// 中文说明：写前取旧值用于值门控（与 SetProperty 同一判据）。本路径直接写
+	// s.store，并未调用 s.SetProperty，故此处是本次写唯一的一条通知。
+	pvChanged := true
+	if propType == btypes.PROP_PRESENT_VALUE {
+		oldValue, oldFound := s.store.GetProperty(objType, objInstance, propType)
+		pvChanged = !oldFound || !covValuesEqual(oldValue, propValue)
+	}
+
 	// Write the property value
 	err = s.store.SetProperty(objType, objInstance, propType, propValue)
 	if err != nil {
@@ -905,7 +918,7 @@ func (s *server) handleWriteProperty(src *btypes.Address, npdu *btypes.NPDU, apd
 
 	s.sendSimpleAck(src, npdu, apdu.InvokeId, btypes.ServiceConfirmedWriteProperty)
 
-	if propType == btypes.PROP_PRESENT_VALUE {
+	if propType == btypes.PROP_PRESENT_VALUE && pvChanged {
 		s.notifyCOV(objType, objInstance)
 	}
 }
@@ -1032,12 +1045,26 @@ func (s *server) handleWriteMultiProperty(src *btypes.Address, npdu *btypes.NPDU
 				}
 			}
 
+			// Gate the per-object COV notification on an actual Present_Value
+			// change, just like the single-property path. The old value must be
+			// read BEFORE this store write; a missing old value means "first
+			// write" and still notifies. This loop writes through s.store
+			// directly (it does NOT call s.SetProperty), so at most one
+			// notification per object is emitted below.
+			// 中文说明：逐对象按值门控；写前取旧值，旧值不存在视为变化。本路径直接
+			// 写 s.store，未调用 s.SetProperty，故每个对象最多只发一条通知。
+			pvChanged := true
+			if prop.Type == btypes.PROP_PRESENT_VALUE {
+				oldValue, oldFound := s.store.GetProperty(objType, objInstance, prop.Type)
+				pvChanged = !oldFound || !covValuesEqual(oldValue, prop.Data)
+			}
+
 			err = s.store.SetProperty(objType, objInstance, prop.Type, prop.Data)
 			if err != nil {
 				s.sendError(src, npdu, apdu.InvokeId, apdu.Service, bacerr.PropertyError, bacerr.WriteAccessDenied)
 				return
 			}
-			if prop.Type == btypes.PROP_PRESENT_VALUE {
+			if prop.Type == btypes.PROP_PRESENT_VALUE && pvChanged {
 				changedPV = true
 			}
 		}
