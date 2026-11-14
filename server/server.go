@@ -453,13 +453,35 @@ func (s *server) GetObject(objType btypes.ObjectType, instance btypes.ObjectInst
 	return s.store.GetObject(objType, instance)
 }
 
-// SetProperty sets a property on an object and notifies COV subscribers when PresentValue changes.
+// SetProperty sets a property on an object and notifies COV subscribers when
+// Present_Value actually changes.
+//
+// BACnet COV semantics: a notification is owed when the monitored value
+// changes, not on every southbound sampling tick. Before this comparison, a
+// point whose value never moved still produced one notification per write
+// (≈10/s for a 100 ms sample cycle). The old value is therefore read BEFORE the
+// write and compared with the incoming one; an equal value skips notifyCOV but
+// is still written to the store, so storage and timestamp/revision semantics
+// stay exactly as they were.
+//
+// 中文说明：写前用 GetProperty 取旧值，值真的变了才 notifyCOV；值相等时**照常写入
+// store**（存储与 database-revision 语义不变），只是不发通知。旧值不存在（首次
+// 写入）视为变化。相等判据见 covValuesEqual（server/cov_valuecompare.go），不做
+// 容差/cov-increment 过滤（下一版议题）。
 func (s *server) SetProperty(objType btypes.ObjectType, instance btypes.ObjectInstance, propType btypes.PropertyType, data interface{}) error {
+	changed := true
+	if propType == btypes.PROP_PRESENT_VALUE {
+		oldValue, found := s.store.GetProperty(objType, instance, propType)
+		// No stored value yet => first write => notify. Otherwise compare.
+		// 中文说明：旧值不存在 ⇒ 首次写入必通知；否则按相等判定决定是否通知。
+		changed = !found || !covValuesEqual(oldValue, data)
+	}
+
 	err := s.store.SetProperty(objType, instance, propType, data)
 	if err != nil {
 		return err
 	}
-	if propType == btypes.PROP_PRESENT_VALUE {
+	if propType == btypes.PROP_PRESENT_VALUE && changed {
 		s.notifyCOV(objType, instance)
 	}
 	return nil
