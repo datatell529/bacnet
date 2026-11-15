@@ -52,7 +52,7 @@ func (c *client) writeProperty(device btypes.Device, wp btypes.PropertyData, bro
 	}
 	// the value filled doesn't matter. it just needs to be non nil
 	err = fmt.Errorf("go")
-	for count := 0; err != nil && count < 2; count++ {
+	for count := 0; err != nil && count < writeRetryCount; count++ {
 		var b []byte
 		var raw interface{}
 		dest := device.Addr
